@@ -8,7 +8,7 @@ The taskbar / tray badge is **actual % used**. The window also shows **should be
 
 - **Used** — live Grok Bot weekly usage from your signed-in Grok Bot session
 - **Should be** — elapsed time in this reset week ÷ week length × 100
-- **Super Grok** — the separate grok.com weekly pool (Chat, Build, Imagine, and the rest), shown in the window only. The taskbar badge stays Grok Bot pace.
+- **Super Grok** — the separate grok.com weekly pool (Chat, Build, Imagine, and the rest), shown in the window only, with the same over / under pace status as Grok Bot. The taskbar badge stays Grok Bot pace.
 - **Bar** — fill is used; the white line is the even-pace target
 - **Color**
   - Green: under pace (more quota left than the clock would suggest)

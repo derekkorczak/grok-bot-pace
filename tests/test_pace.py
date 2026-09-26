@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from grok_bot_pace.api import parse_usage_payload
 from grok_bot_pace.icons import COLORS, badge_color, badge_image, badge_label
-from grok_bot_pace.pace import classify, compute_pace, expected_percent, format_hours
+from grok_bot_pace.pace import classify, compute_pace, expected_percent, format_hours, status_label
 from grok_bot_pace.supergrok import format_products, parse_credits_payload
 
 
@@ -108,3 +108,25 @@ def test_format_hours() -> None:
     assert format_hours(timedelta(days=4, hours=21)) == "4d 21h"
     assert format_hours(timedelta(hours=3, minutes=12)) == "3h 12m"
     assert format_hours(timedelta(minutes=9)) == "9m"
+
+
+def test_supergrok_pace_difference_matches_grok_bot() -> None:
+    start = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    now = start + timedelta(days=3.5)
+
+    def credits(used: float):
+        return parse_credits_payload(
+            {"config": {"creditUsagePercent": used, "currentPeriod": {"start": start.isoformat(), "end": end.isoformat()}}},
+            fetched_at=now,
+        )
+
+    under = compute_pace(credits(22).as_usage(), now=now)
+    over = compute_pace(credits(62).as_usage(), now=now)
+    even = compute_pace(credits(52).as_usage(), now=now)
+    assert status_label(under) == "Under pace by 28 pts"
+    assert status_label(over) == "Over pace by 12 pts"
+    assert status_label(even) == "On track for the week"
+    assert status_label(compute_pace(credits(100).as_usage(), now=now)) == "Quota exhausted"
+    assert (under.status, over.status, even.status) == ("under", "over", "on_track")
+    assert status_label(over) == status_label(compute_pace(_snap(62, start, end, now), now=now))
