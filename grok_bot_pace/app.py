@@ -375,11 +375,13 @@ class PaceApp:
         self.sg_bar.pack(fill="x", pady=(2, 4))
 
         sg_meta = tk.Frame(pad, bg=BG)
-        sg_meta.pack(fill="x", pady=(4, 10))
-        self.sg_products = tk.Label(sg_meta, text="", fg=MUTED, bg=BG, font=_ui_font(8))
-        self.sg_products.pack(side="left")
+        sg_meta.pack(fill="x", pady=(4, 2))
+        self.sg_status = tk.Label(sg_meta, text="", fg=TEXT, bg=BG, font=_ui_font(10, bold=True))
+        self.sg_status.pack(side="left")
         self.sg_reset = tk.Label(sg_meta, text="", fg=MUTED, bg=BG, font=_ui_font(8))
         self.sg_reset.pack(side="right")
+        self.sg_products = tk.Label(pad, text="", fg=MUTED, bg=BG, font=_ui_font(8))
+        self.sg_products.pack(anchor="w", pady=(0, 10))
 
         buttons = tk.Frame(pad, bg=BG)
         buttons.pack(fill="x")
@@ -662,6 +664,7 @@ class PaceApp:
         if sg is None:
             self.sg_used_value.configure(text="--%", fg=TEXT)
             self.sg_expected_value.configure(text="--%")
+            self.sg_status.configure(text="", fg=TEXT)
             self.sg_products.configure(text=self.sg_error or "Waiting for Super Grok usage…")
             self.sg_reset.configure(text="")
             self._draw_bar(self.sg_bar, 0, 0, status_color("unknown"))
@@ -669,6 +672,7 @@ class PaceApp:
             sg_color = status_color(sg.status)
             self.sg_used_value.configure(text=f"{sg.used_percent:.0f}%", fg=sg_color)
             self.sg_expected_value.configure(text=f"{sg.expected_percent:.0f}%")
+            self.sg_status.configure(text=status_label(sg), fg=sg_color)
             products = format_products(self.sg_snapshot.products) if self.sg_snapshot else ""
             self.sg_products.configure(text=products or (self.sg_error or ""))
             self.sg_reset.configure(text=f"resets in {format_hours(sg.resets_in)}")
