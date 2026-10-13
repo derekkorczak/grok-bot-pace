@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
@@ -331,8 +332,10 @@ class PaceApp:
 
         self._build()
         self._place_window()
+        self._show_event = _kernel32.CreateEventW(None, False, False, SHOW_EVENT_NAME)
         self.root.after(80, self._after_map)
         self.root.after(200, self.refresh_async)
+        self.root.after(300, self._poll_show_event)
         self.root.after(TICK_MS, self._tick)
         self.root.after(REFRESH_MS, self._auto_refresh)
 
@@ -460,6 +463,7 @@ class PaceApp:
             x = max(left + 8, right - width - 16)
             y = max(top + 8, bottom - height - 16)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self._move_on_screen()
 
     def _saved_position(self) -> tuple[int | None, int | None]:
         import re
@@ -527,8 +531,41 @@ class PaceApp:
 
     def show_window(self, *_args) -> None:
         self.root.deiconify()
-        self.root.after(40, lambda: self.root.lift())
-        self.root.after(40, lambda: self.root.focus_force())
+        try:
+            self.root.state("normal")
+        except Exception:
+            pass
+        self.root.after(40, self._bring_to_front)
+
+    def _bring_to_front(self) -> None:
+        self._move_on_screen()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.focus_force()
+        if not self.settings.get("always_on_top", True):
+            self.root.after(80, lambda: self.root.attributes("-topmost", False))
+
+    def _move_on_screen(self) -> None:
+        self.root.update_idletasks()
+        width = max(self.root.winfo_width(), WINDOW_W)
+        height = max(self.root.winfo_height(), WINDOW_H)
+        x = self.root.winfo_x()
+        y = self.root.winfo_y()
+        try:
+            left, top, right, bottom = work_area()
+        except Exception:
+            return
+        off = x + width < left + 20 or x > right - 20 or y + height < top + 20 or y > bottom - 20
+        if not off:
+            return
+        x = max(left + 8, right - width - 16)
+        y = max(top + 8, bottom - height - 16)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _poll_show_event(self) -> None:
+        if _kernel32.WaitForSingleObject(self._show_event, 0) == 0:
+            self.show_window()
+        self.root.after(300, self._poll_show_event)
 
     def quit(self, *_args) -> None:
         self.settings["geometry"] = self.root.geometry()
@@ -813,19 +850,32 @@ def _ui_font(size: int, bold: bool = False) -> tkfont.Font:
     return cached
 
 
-def _single_instance_mutex():
-    import ctypes
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+MUTEX_NAME = "Local\\GrokBotPaceSingleton"
+SHOW_EVENT_NAME = "Local\\GrokBotPaceShow"
+_INSTANCE_HANDLES: list[int] = []
 
-    handle = ctypes.windll.kernel32.CreateMutexW(None, True, "Local\\GrokBotPaceSingleton")
-    if ctypes.windll.kernel32.GetLastError() == 183:
+
+def _single_instance_mutex():
+    handle = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
+    if ctypes.get_last_error() == 183:
         return None
     return handle
+
+
+def _request_show() -> None:
+    event = _kernel32.OpenEventW(0x0002, False, SHOW_EVENT_NAME)
+    if not event:
+        return
+    _kernel32.SetEvent(event)
+    _kernel32.CloseHandle(event)
 
 
 def main() -> None:
     enable_dpi_awareness()
     mutex = _single_instance_mutex()
     if mutex is None:
-        # An existing instance is already in the tray / taskbar.
+        _request_show()
         return
+    _INSTANCE_HANDLES.append(mutex)
     PaceApp().run()
