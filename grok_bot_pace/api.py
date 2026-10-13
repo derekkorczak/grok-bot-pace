@@ -1,4 +1,4 @@
-"""Grok Bot weekly usage from Cursor's GetSandUsageStatus endpoint."""
+"""Included usage from Cursor's dashboard RPCs."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ class UsageSnapshot:
     plan_label: str
     fetched_at: datetime
     cursor_plan_name: str | None = None
+    unified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -34,6 +35,7 @@ class UsageSnapshot:
             "plan_label": self.plan_label,
             "fetched_at": self.fetched_at.isoformat(),
             "cursor_plan_name": self.cursor_plan_name,
+            "unified": self.unified,
         }
 
     @classmethod
@@ -46,6 +48,7 @@ class UsageSnapshot:
             plan_label=str(data.get("plan_label") or "Grok Bot"),
             fetched_at=parse_time(data["fetched_at"]),
             cursor_plan_name=data.get("cursor_plan_name"),
+            unified=bool(data.get("unified", False)),
         )
 
 
@@ -87,6 +90,20 @@ def parse_time(value: Any) -> datetime:
     text = str(value).strip()
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
+    if text.isdigit():
+        return parse_time(int(text))
+    # Grok timestamps sometimes include nanoseconds; datetime only takes microseconds.
+    if "." in text:
+        head, rest = text.split(".", 1)
+        digits = ""
+        tz = ""
+        for index, char in enumerate(rest):
+            if char.isdigit():
+                digits += char
+            else:
+                tz = rest[index:]
+                break
+        text = f"{head}.{(digits + '000000')[:6]}{tz}"
     parsed = datetime.fromisoformat(text)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -116,10 +133,52 @@ def parse_usage_payload(data: dict[str, Any], fetched_at: datetime | None = None
         plan_label=str(plan),
         fetched_at=fetched_at or datetime.now(timezone.utc),
         cursor_plan_name=_pick(data, "cursorPlanName", "cursor_plan_name"),
+        unified=bool(_pick(data, "isUnified", "is_unified") or False),
     )
 
 
-def fetch_usage(access_token: str) -> UsageSnapshot:
+@dataclass
+class PeriodUsage:
+    """Included-usage meter from GetCurrentPeriodUsage.
+
+    On The X Subscription this is the shared weekly pool. ``api_percent`` is
+    third-party model usage, which is billed outside that pool.
+    """
+
+    total_percent: float | None
+    api_percent: float | None
+    period_start: datetime | None
+    period_end: datetime | None
+
+
+def _plan_block(data: dict[str, Any]) -> dict[str, Any]:
+    plan = data.get("planUsage")
+    if isinstance(plan, dict) and plan:
+        return plan
+    individual = data.get("individualUsage")
+    if isinstance(individual, dict) and isinstance(individual.get("plan"), dict):
+        return individual["plan"]
+    return {}
+
+
+def parse_period_usage(data: dict[str, Any]) -> PeriodUsage:
+    plan = _plan_block(data)
+    total = plan.get("totalPercentUsed")
+    api = plan.get("apiPercentUsed")
+    start = _pick(data, "billingCycleStart", "billing_cycle_start")
+    end = _pick(data, "billingCycleEnd", "billing_cycle_end")
+    return PeriodUsage(
+        total_percent=None if total is None else float(total),
+        api_percent=None if api is None else float(api),
+        period_start=parse_time(start) if start else None,
+        period_end=parse_time(end) if end else None,
+    )
+
+
+DASHBOARD_RPC = USAGE_URL.rsplit("/", 1)[0] + "/"
+
+
+def _cursor_post(access_token: str, method: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     machine_id = str(uuid.uuid4())
     headers = {
         "Content-Type": "application/json",
@@ -131,20 +190,29 @@ def fetch_usage(access_token: str) -> UsageSnapshot:
         "x-ghost-mode": "true",
         "x-request-id": str(uuid.uuid4()),
     }
-    req = Request(USAGE_URL, data=b"{}", method="POST")
+    req = Request(DASHBOARD_RPC + method, data=json.dumps(body or {}).encode("utf-8"), method="POST")
     for key, value in headers.items():
         req.add_header(key, value)
     try:
         with urlopen(req, timeout=20) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"HTTP {exc.code}: {body[:240]}") from exc
+        body_text = exc.read().decode("utf-8", "replace")
+        raise RuntimeError(f"HTTP {exc.code}: {body_text[:240]}") from exc
     except URLError as exc:
         raise RuntimeError(f"network error: {exc.reason}") from exc
     if not isinstance(payload, dict):
         raise RuntimeError("usage response was not JSON")
+    return payload
+
+
+def fetch_usage(access_token: str) -> UsageSnapshot:
+    payload = _cursor_post(access_token, "GetSandUsageStatus")
     if "usagePercent" not in payload and "usage_percent" not in payload:
         message = payload.get("message") or payload.get("code") or "unexpected usage response"
         raise RuntimeError(str(message))
     return parse_usage_payload(payload)
+
+
+def fetch_period_usage(access_token: str) -> PeriodUsage:
+    return parse_period_usage(_cursor_post(access_token, "GetCurrentPeriodUsage"))

@@ -1,0 +1,13 @@
+---
+description: Commit finished work and push it to GitHub
+alwaysApply: true
+---
+
+# Push changes to GitHub
+
+When a task changes files in this repo, commit those changes and push them to GitHub before finishing.
+
+- Stage only the files for the task. Do not commit secrets or local caches.
+- Write a short commit message that matches the repo style and says why the change was made.
+- Push the current branch to `origin`. Do not force-push.
+- If the commit or push fails, fix the problem and create a new commit. Do not amend a rejected commit.

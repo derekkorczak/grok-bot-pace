@@ -16,7 +16,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from PIL import ImageTk
 
-from grok_bot_pace.api import UsageSnapshot, fetch_usage
+from grok_bot_pace.api import UsageSnapshot, fetch_period_usage, fetch_usage
 from grok_bot_pace.auth import Tokens, app_data_dir, load_tokens, refresh_access_token, save_cached
 from grok_bot_pace.icons import (
     badge_ico_bytes,
@@ -28,7 +28,13 @@ from grok_bot_pace.icons import (
     system_icon_sizes,
 )
 from grok_bot_pace.pace import Pace, compute_pace, format_hours, status_label, tooltip_text
-from grok_bot_pace.supergrok import SuperGrokSnapshot, fetch_supergrok, format_products
+from grok_bot_pace.supergrok import (
+    SuperGrokSnapshot,
+    assemble_pool,
+    fetch_supergrok,
+    format_cents,
+    format_percent,
+)
 
 BG = "#0e0f12"
 CARD = "#17181c"
@@ -37,7 +43,20 @@ MUTED = "#9aa0a6"
 BAR_BG = "#2a2d33"
 REFRESH_MS = 5 * 60 * 1000
 TICK_MS = 15_000
-WINDOW_W, WINDOW_H = 340, 420
+WINDOW_W, WINDOW_H = 340, 280
+
+PRODUCT_COLORS = {
+    "Cursor": "#7dd3fc",
+    "Grok Bot": "#c4b5fd",
+    "Build": "#3dd68c",
+    "Chat": "#f5a524",
+    "Imagine": "#f472b6",
+    "Voice": "#38bdf8",
+    "API": "#fb7185",
+    "Tasks": "#a3e635",
+    "Other": "#9aa0a6",
+    "Other models": "#f5a524",
+}
 
 
 def _settings_path() -> Path:
@@ -50,6 +69,10 @@ def _cache_path() -> Path:
 
 def _sg_cache_path() -> Path:
     return app_data_dir() / "last_supergrok.json"
+
+
+def _pool_cache_path() -> Path:
+    return app_data_dir() / "last_pool.json"
 
 
 def load_settings() -> dict:
@@ -77,10 +100,6 @@ def load_cached_snapshot() -> UsageSnapshot | None:
         return None
 
 
-def save_cached_snapshot(snapshot: UsageSnapshot) -> None:
-    _cache_path().write_text(json.dumps(snapshot.to_dict()), encoding="utf-8")
-
-
 def load_cached_supergrok() -> SuperGrokSnapshot | None:
     path = _sg_cache_path()
     if not path.exists():
@@ -91,8 +110,25 @@ def load_cached_supergrok() -> SuperGrokSnapshot | None:
         return None
 
 
-def save_cached_supergrok(snapshot: SuperGrokSnapshot) -> None:
-    _sg_cache_path().write_text(json.dumps(snapshot.to_dict()), encoding="utf-8")
+def load_cached_pool() -> SuperGrokSnapshot | None:
+    path = _pool_cache_path()
+    if not path.exists():
+        return None
+    try:
+        return SuperGrokSnapshot.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def save_cached_pool(snapshot: SuperGrokSnapshot) -> None:
+    _pool_cache_path().write_text(json.dumps(snapshot.to_dict()), encoding="utf-8")
+
+
+def _cached_pool() -> SuperGrokSnapshot | None:
+    pool = load_cached_pool()
+    if pool is not None:
+        return pool
+    return assemble_pool(load_cached_snapshot(), None, load_cached_supergrok())
 
 
 def project_root() -> Path:
@@ -271,18 +307,14 @@ class PaceApp:
     def __init__(self) -> None:
         self.settings = load_settings()
         self.tokens: Tokens | None = None
-        self.snapshot: UsageSnapshot | None = load_cached_snapshot()
+        self.pool: SuperGrokSnapshot | None = _cached_pool()
         self.pace: Pace | None = (
-            compute_pace(self.snapshot, stale=True) if self.snapshot is not None else None
-        )
-        self.sg_snapshot: SuperGrokSnapshot | None = load_cached_supergrok()
-        self.sg_pace: Pace | None = (
-            compute_pace(self.sg_snapshot.as_usage(), stale=True)
-            if self.sg_snapshot is not None
-            else None
+            compute_pace(self.pool.as_usage(), stale=True) if self.pool is not None else None
         )
         self.error: str | None = None
-        self.sg_error: str | None = None
+        self.breakdown_error: str | None = None
+        self._detail_key: object = None
+        self._fitted: tuple[int, int] | None = None
         self._refreshing = False
         self._icon = None
         self._icon_photos: list[ImageTk.PhotoImage] = []
@@ -310,7 +342,7 @@ class PaceApp:
 
         header = tk.Frame(pad, bg=BG)
         header.pack(fill="x")
-        self.brand = tk.Label(header, text="Grok Bot", fg=TEXT, bg=BG, font=_ui_font(11, bold=True))
+        self.brand = tk.Label(header, text="Weekly pool", fg=TEXT, bg=BG, font=_ui_font(11, bold=True))
         self.brand.pack(side="left")
         self.plan = tk.Label(header, text="", fg=MUTED, bg=BG, font=_ui_font(9))
         self.plan.pack(side="right")
@@ -333,7 +365,7 @@ class PaceApp:
         self.bar.pack(fill="x", pady=(4, 6))
         tk.Label(
             pad,
-            text="Fill is actual usage.  The line is an even weekly pace.",
+            text="Fill is included usage.  The line is an even weekly pace.",
             fg=MUTED,
             bg=BG,
             font=_ui_font(8),
@@ -346,42 +378,8 @@ class PaceApp:
         self.reset = tk.Label(meta, text="", fg=MUTED, bg=BG, font=_ui_font(9))
         self.reset.pack(side="right")
 
-        tk.Frame(pad, bg="#2a2d33", height=1).pack(fill="x", pady=(4, 12))
-
-        sg_header = tk.Frame(pad, bg=BG)
-        sg_header.pack(fill="x")
-        tk.Label(sg_header, text="Super Grok", fg=TEXT, bg=BG, font=_ui_font(11, bold=True)).pack(
-            side="left"
-        )
-        self.sg_plan = tk.Label(sg_header, text="weekly pool", fg=MUTED, bg=BG, font=_ui_font(9))
-        self.sg_plan.pack(side="right")
-
-        sg_numbers = tk.Frame(pad, bg=BG)
-        sg_numbers.pack(fill="x", pady=(8, 4))
-        sg_left = tk.Frame(sg_numbers, bg=BG)
-        sg_left.pack(side="left")
-        self.sg_used_value = tk.Label(sg_left, text="--%", fg=TEXT, bg=BG, font=_ui_font(18, bold=True))
-        self.sg_used_value.pack(anchor="w")
-        tk.Label(sg_left, text="used", fg=MUTED, bg=BG, font=_ui_font(8)).pack(anchor="w")
-        sg_right = tk.Frame(sg_numbers, bg=BG)
-        sg_right.pack(side="right")
-        self.sg_expected_value = tk.Label(
-            sg_right, text="--%", fg=TEXT, bg=BG, font=_ui_font(18, bold=True)
-        )
-        self.sg_expected_value.pack(anchor="e")
-        tk.Label(sg_right, text="should be", fg=MUTED, bg=BG, font=_ui_font(8)).pack(anchor="e")
-
-        self.sg_bar = tk.Canvas(pad, width=308, height=12, bg=BAR_BG, highlightthickness=0, bd=0)
-        self.sg_bar.pack(fill="x", pady=(2, 4))
-
-        sg_meta = tk.Frame(pad, bg=BG)
-        sg_meta.pack(fill="x", pady=(4, 2))
-        self.sg_status = tk.Label(sg_meta, text="", fg=TEXT, bg=BG, font=_ui_font(10, bold=True))
-        self.sg_status.pack(side="left")
-        self.sg_reset = tk.Label(sg_meta, text="", fg=MUTED, bg=BG, font=_ui_font(8))
-        self.sg_reset.pack(side="right")
-        self.sg_products = tk.Label(pad, text="", fg=MUTED, bg=BG, font=_ui_font(8))
-        self.sg_products.pack(anchor="w", pady=(0, 10))
+        self.details = tk.Frame(pad, bg=BG)
+        self.details.pack(fill="x", pady=(10, 6))
 
         buttons = tk.Frame(pad, bg=BG)
         buttons.pack(fill="x")
@@ -572,11 +570,8 @@ class PaceApp:
         self.root.after(0, self.quit)
 
     def _tick(self) -> None:
-        if self.snapshot is not None:
-            self.pace = compute_pace(self.snapshot, stale=bool(self.error))
-        if self.sg_snapshot is not None:
-            self.sg_pace = compute_pace(self.sg_snapshot.as_usage(), stale=bool(self.sg_error))
-        if self.snapshot is not None or self.sg_snapshot is not None:
+        if self.pool is not None:
+            self.pace = compute_pace(self.pool.as_usage(), stale=bool(self.error))
             self.render()
         self.root.after(TICK_MS, self._tick)
 
@@ -587,56 +582,62 @@ class PaceApp:
         self.footer.configure(text="Refreshing…")
 
         def work() -> None:
-            error = None
-            snapshot = None
-            sg_snapshot = None
-            sg_error = None
+            sand = None
+            sand_error = None
+            period = None
+            period_error = None
+            credits = None
+            credits_error = None
             try:
                 if self.tokens is None:
                     self.tokens = load_tokens()
                 try:
-                    snapshot = fetch_usage(self.tokens.access_token)
+                    sand = fetch_usage(self.tokens.access_token)
                 except RuntimeError as exc:
                     if "401" in str(exc) and self.tokens.refresh_token:
                         self.tokens = refresh_access_token(self.tokens.refresh_token)
                         save_cached(self.tokens)
-                        snapshot = fetch_usage(self.tokens.access_token)
+                        sand = fetch_usage(self.tokens.access_token)
                     else:
                         raise
+                try:
+                    period = fetch_period_usage(self.tokens.access_token)
+                except Exception as exc:
+                    period_error = str(exc)
             except Exception as exc:
-                error = str(exc)
+                sand_error = str(exc)
             try:
-                sg_snapshot = fetch_supergrok()
+                credits = fetch_supergrok()
             except Exception as exc:
-                sg_error = str(exc)
-            self.root.after(0, lambda: self._on_refresh(snapshot, error, sg_snapshot, sg_error))
+                credits_error = str(exc)
+            self.root.after(
+                0,
+                lambda: self._on_refresh(sand, sand_error, period, period_error, credits, credits_error),
+            )
 
         threading.Thread(target=work, daemon=True).start()
 
     def _on_refresh(
         self,
-        snapshot: UsageSnapshot | None,
-        error: str | None,
-        sg_snapshot: SuperGrokSnapshot | None,
-        sg_error: str | None,
+        sand,
+        sand_error: str | None,
+        period,
+        period_error: str | None,
+        credits,
+        credits_error: str | None,
     ) -> None:
         self._refreshing = False
-        if snapshot is not None:
-            self.snapshot = snapshot
+        pool = assemble_pool(sand, period, credits)
+        if pool is not None:
+            self.pool = pool
             self.error = None
-            save_cached_snapshot(snapshot)
+            self.breakdown_error = credits_error if not pool.products and credits_error else None
+            save_cached_pool(pool)
         else:
-            self.error = error
-        if sg_snapshot is not None:
-            self.sg_snapshot = sg_snapshot
-            self.sg_error = None
-            save_cached_supergrok(sg_snapshot)
-        else:
-            self.sg_error = sg_error
-        if self.snapshot is not None:
-            self.pace = compute_pace(self.snapshot, stale=self.error is not None)
-        if self.sg_snapshot is not None:
-            self.sg_pace = compute_pace(self.sg_snapshot.as_usage(), stale=self.sg_error is not None)
+            self.breakdown_error = None
+            self.error = sand_error or period_error or credits_error or "Could not load usage"
+        if self.pool is not None:
+            self.pace = compute_pace(self.pool.as_usage(), stale=self.error is not None)
         self.render()
 
     def _auto_refresh(self) -> None:
@@ -648,7 +649,9 @@ class PaceApp:
         if pace is None:
             self.used_value.configure(text="--%")
             self.expected_value.configure(text="--%")
-            self.status.configure(text=self.error or "Waiting for Grok Bot usage…")
+            self.plan.configure(text="")
+            self.status.configure(text=self.error or "Waiting for usage…")
+            self.reset.configure(text="")
             self._draw_bar(self.bar, 0, 0, status_color("unknown"))
         else:
             color = status_color(pace.status)
@@ -659,38 +662,84 @@ class PaceApp:
             self.reset.configure(text=f"resets in {format_hours(pace.resets_in)}")
             self._draw_bar(self.bar, pace.used_percent, pace.expected_percent, color)
             self.root.title(f"{badge_label(pace)} pts vs pace")
+        self._render_details()
 
-        sg = self.sg_pace
-        if sg is None:
-            self.sg_used_value.configure(text="--%", fg=TEXT)
-            self.sg_expected_value.configure(text="--%")
-            self.sg_status.configure(text="", fg=TEXT)
-            self.sg_products.configure(text=self.sg_error or "Waiting for Super Grok usage…")
-            self.sg_reset.configure(text="")
-            self._draw_bar(self.sg_bar, 0, 0, status_color("unknown"))
-        else:
-            sg_color = status_color(sg.status)
-            self.sg_used_value.configure(text=f"{sg.used_percent:.0f}%", fg=sg_color)
-            self.sg_expected_value.configure(text=f"{sg.expected_percent:.0f}%")
-            self.sg_status.configure(text=status_label(sg), fg=sg_color)
-            products = format_products(self.sg_snapshot.products) if self.sg_snapshot else ""
-            self.sg_products.configure(text=products or (self.sg_error or ""))
-            self.sg_reset.configure(text=f"resets in {format_hours(sg.resets_in)}")
-            self._draw_bar(self.sg_bar, sg.used_percent, sg.expected_percent, sg_color)
-
-        fetched = None
-        if pace and pace.fetched_at:
-            fetched = pace.fetched_at
-        if sg and sg.fetched_at and (fetched is None or sg.fetched_at > fetched):
-            fetched = sg.fetched_at
-        extra_bits = [bit for bit in (self.error, self.sg_error) if bit]
-        extra = f"  ·  {extra_bits[0]}" if extra_bits else ""
+        fetched = pace.fetched_at if pace else None
+        extra = f"  ·  {self.error}" if self.error else ""
         if fetched:
             stamp = fetched.astimezone().strftime("%I:%M %p").lstrip("0")
             self.footer.configure(text=f"Updated {stamp}{extra}")
         else:
-            self.footer.configure(text=extra_bits[0] if extra_bits else "")
+            self.footer.configure(text=self.error or "")
         self._sync_icon()
+        self._fit_window()
+
+    def _render_details(self) -> None:
+        pool = self.pool
+        rows: list[tuple[str, float, str, str | None]] = []
+        notes: list[str] = []
+        if pool is not None:
+            for name, pct in pool.products:
+                rows.append((name, pct, PRODUCT_COLORS.get(name, MUTED), None))
+            if pool.additional_percent:
+                rows.append(("Other models", pool.additional_percent, PRODUCT_COLORS["Other models"], None))
+                notes.append("Other models are billed outside this pool")
+            if pool.prepaid_cents and pool.prepaid_cents > 0:
+                notes.append(f"Prepaid {format_cents(pool.prepaid_cents)}")
+            if pool.on_demand_cap_cents and pool.on_demand_cap_cents > 0:
+                used = pool.on_demand_used_cents or 0
+                notes.append(f"On-demand {format_cents(used)} of {format_cents(pool.on_demand_cap_cents)}")
+        if self.breakdown_error and not rows:
+            notes.append(self.breakdown_error)
+        key = (tuple((name, round(pct, 2), note) for name, pct, _color, note in rows), tuple(notes))
+        if key == self._detail_key:
+            return
+        self._detail_key = key
+        for child in self.details.winfo_children():
+            child.destroy()
+        if not rows and not notes:
+            return
+        tk.Label(self.details, text="What's using it", fg=TEXT, bg=BG, font=_ui_font(10, bold=True)).pack(
+            anchor="w", pady=(0, 4)
+        )
+        top = max((pct for _name, pct, _color, _note in rows), default=1.0) or 1.0
+        for name, pct, color, note in rows:
+            self._product_row(name, pct, color, top, note)
+        if notes:
+            tk.Label(
+                self.details,
+                text=" · ".join(notes),
+                fg=MUTED,
+                bg=BG,
+                font=_ui_font(8),
+                wraplength=WINDOW_W - 40,
+                justify="left",
+            ).pack(anchor="w", pady=(4, 0))
+
+    def _product_row(self, name: str, pct: float, color: str, top: float, note: str | None) -> None:
+        row = tk.Frame(self.details, bg=BG)
+        row.pack(fill="x", pady=2)
+        width = 108
+        bar = tk.Canvas(row, width=width, height=8, bg=BAR_BG, highlightthickness=0, bd=0)
+        bar.pack(side="left", pady=3)
+        used_x = max(0, min(width, pct / top * width))
+        if used_x > 0:
+            bar.create_rectangle(0, 0, used_x, 8, fill=color, outline="")
+        label = name if not note else f"{name}  ·  {note}"
+        tk.Label(row, text=label, fg=TEXT, bg=BG, font=_ui_font(9)).pack(side="left", padx=(8, 0))
+        tk.Label(row, text=format_percent(pct), fg=MUTED, bg=BG, font=_ui_font(9)).pack(side="right")
+
+    def _fit_window(self) -> None:
+        if not self.root.winfo_viewable():
+            return
+        self.root.update_idletasks()
+        width = max(WINDOW_W, int(self.root.winfo_reqwidth()))
+        height = max(WINDOW_H, int(self.root.winfo_reqheight()))
+        target = (width, height)
+        if target == self._fitted:
+            return
+        self._fitted = target
+        self.root.geometry(f"{width}x{height}+{self.root.winfo_x()}+{self.root.winfo_y()}")
 
     def _draw_bar(self, canvas: tk.Canvas, used: float, expected: float, color: str) -> None:
         canvas.delete("all")

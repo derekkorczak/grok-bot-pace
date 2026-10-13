@@ -105,7 +105,7 @@ def status_label(pace: Pace) -> str:
 def tooltip_text(pace: Pace) -> str:
     stale = " · stale" if pace.stale else ""
     return (
-        f"Grok Bot  {pace.used_percent:.0f}% used  ·  "
+        f"{pace.plan_label}  {pace.used_percent:.0f}% used  ·  "
         f"should be {pace.expected_percent:.0f}%  ·  "
         f"{status_label(pace)}  ·  "
         f"resets in {format_hours(pace.resets_in)}{stale}"

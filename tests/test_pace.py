@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
-from grok_bot_pace.api import parse_usage_payload
+from grok_bot_pace.api import parse_period_usage, parse_time, parse_usage_payload
 from grok_bot_pace.icons import COLORS, badge_color, badge_image, badge_label
 from grok_bot_pace.pace import classify, compute_pace, expected_percent, format_hours, status_label
-from grok_bot_pace.supergrok import format_products, parse_credits_payload
+from grok_bot_pace.supergrok import assemble_pool, format_cents, format_products, parse_credits_payload
 
 
 def test_expected_percent_bounds() -> None:
@@ -102,6 +102,112 @@ def test_parse_supergrok_credits() -> None:
     usage = snap.as_usage()
     assert usage.plan_label == "Super Grok"
     assert usage.used_percent == 22.0
+
+
+def test_parse_time_millis_string() -> None:
+    assert parse_time("1791898338037") == parse_time("2026-10-13T13:32:18.037Z")
+
+
+def test_unified_pool_labels_unnamed_product_as_cursor() -> None:
+    start = datetime(2026, 10, 13, 13, 32, 18, tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    now = start + timedelta(hours=3)
+    sand = parse_usage_payload(
+        {
+            "usagePercent": 8.039729,
+            "hasAvailableUsage": True,
+            "currentPeriodStart": start.isoformat(),
+            "nextResetTimestampUtc": end.isoformat(),
+            "grokPlanLabel": "Grok Bot Plan",
+            "cursorPlanName": "Premium",
+            "isUnified": True,
+        },
+        fetched_at=now,
+    )
+    period = parse_period_usage(
+        {
+            "billingCycleStart": "1791898338037",
+            "billingCycleEnd": "1792503138037",
+            "planUsage": {"totalPercentUsed": 7.95, "autoPercentUsed": 7.95, "apiPercentUsed": 0},
+        }
+    )
+    credits = parse_credits_payload(
+        {
+            "config": {
+                "creditUsagePercent": 7,
+                "isUnifiedBillingUser": True,
+                "currentPeriod": {"start": start.isoformat(), "end": end.isoformat()},
+                "productUsage": [
+                    {"usagePercent": 5},
+                    {"product": "GrokBot", "usagePercent": 2},
+                    {"product": "GrokBuild", "usagePercent": 0},
+                ],
+                "prepaidBalance": {"val": 1250},
+                "onDemandCap": {"val": 2000},
+                "onDemandUsed": {"val": 300},
+            }
+        },
+        fetched_at=now,
+    )
+    assert sand.unified is True
+    assert format_products(credits.products) == "Cursor 5% · Grok Bot 2%"
+    pool = assemble_pool(sand, period, credits)
+    assert pool is not None
+    assert pool.plan_label == "Premium"
+    assert pool.unified is True
+    assert pool.used_percent == 8.039729
+    assert pool.additional_percent is None
+    assert pool.prepaid_cents == 1250
+    assert format_cents(pool.prepaid_cents or 0) == "$12.50"
+    assert format_products(pool.products) == "Cursor 5% · Grok Bot 2%"
+    pace = compute_pace(pool.as_usage(), now=now)
+    assert pace.plan_label == "Premium"
+    assert abs((pool.period_start - parse_time("2026-10-13T13:32:18.037Z")).total_seconds()) < 2
+
+
+def test_other_models_stay_outside_the_pool() -> None:
+    start = datetime(2026, 10, 13, 13, 32, tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    period = parse_period_usage(
+        {
+            "billingCycleStart": start.isoformat(),
+            "billingCycleEnd": end.isoformat(),
+            "planUsage": {"totalPercentUsed": 20, "apiPercentUsed": 4.2},
+        }
+    )
+    sand = parse_usage_payload(
+        {
+            "usagePercent": 20,
+            "currentPeriodStart": start.isoformat(),
+            "nextResetTimestampUtc": end.isoformat(),
+            "cursorPlanName": "Super",
+            "isUnified": True,
+        },
+        fetched_at=start,
+    )
+    pool = assemble_pool(sand, period, None)
+    assert pool is not None
+    assert pool.plan_label == "Super"
+    assert pool.used_percent == 20
+    assert pool.additional_percent == 4.2
+    assert pool.products == []
+
+
+def test_legacy_unnamed_product_is_other() -> None:
+    start = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    end = start + timedelta(days=7)
+    snap = parse_credits_payload(
+        {
+            "config": {
+                "creditUsagePercent": 1,
+                "currentPeriod": {"start": start.isoformat(), "end": end.isoformat()},
+                "productUsage": [{"usagePercent": 1}],
+            }
+        },
+        fetched_at=start,
+    )
+    assert snap.products == [("Other", 1.0)]
+    assert snap.plan_label == "Super Grok"
 
 
 def test_format_hours() -> None:
