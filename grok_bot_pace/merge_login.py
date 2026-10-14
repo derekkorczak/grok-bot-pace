@@ -1,10 +1,11 @@
 """Sign in to Merge Gateway in a local Chrome window and store that session.
 
-The tray app runs on this computer, so there is no server to push to. This
-command opens Chrome or Edge, waits for the Google sign-in to finish, then
-keeps the dashboard session in the app data folder (DPAPI-protected). The
-browser profile stays on this computer, so the next run is usually a short
-Google confirm.
+Google refuses sign-in when a browser is started with the remote-debugging
+flag, so the sign-in cannot run in the same process that reads the cookies.
+This command opens the browser *without* that flag, waits for the window to
+close, then reopens the same profile *with* the flag to read the Merge
+cookies. The browser profile stays on this computer, so the next run is
+usually a short Google confirm.
 """
 
 from __future__ import annotations
@@ -13,34 +14,24 @@ import base64
 import hashlib
 import json
 import os
-import secrets
 import shutil
 import socket
 import struct
 import subprocess
 import sys
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from urllib.request import Request, build_opener
 
 from grok_bot_pace.auth import app_data_dir
-from grok_bot_pace.merge_gateway import (
-    MergeAuthError,
-    authorize_url,
-    exchange_cli_code,
-    fetch_overview,
-    refresh_cli_token,
-    save_session,
-)
+from grok_bot_pace.merge_gateway import MergeAuthError, fetch_overview, save_session
 
 LOGIN_URL = "https://api-gateway.merge.dev/sso/auth/google/login"
-SIGN_IN_SECONDS = 300
-TOKEN_SECONDS = 20
+SIGN_IN_SECONDS = 600
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def profile_dir() -> Path:
@@ -80,7 +71,61 @@ def run(*, browser: str | None = None, data_dir: Path | None = None) -> None:
     binary = find_browser(browser)
     profile = profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
-    print("Opening the browser. Sign in to Merge Gateway with Google.", flush=True)
+    print(
+        "Opening the browser. Sign in to Merge Gateway with Google, then close the window.",
+        flush=True,
+    )
+    proc = subprocess.Popen(
+        [
+            binary,
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            LOGIN_URL,
+        ]
+    )
+    try:
+        _wait_for_close(proc)
+    finally:
+        _stop(proc)
+    print("Reading the Merge Gateway session.", flush=True)
+    session = _read_session(binary, profile)
+    save_session(data_dir or app_data_dir(), session)
+    print("Merge Gateway session stored.", flush=True)
+
+
+def _wait_for_close(proc: subprocess.Popen) -> None:
+    """Wait for the sign-in window to close, then close it cleanly if it lingers.
+
+    Chrome only flushes cookies to disk when it exits normally, so the window
+    must be closed rather than killed.
+    """
+    deadline = time.monotonic() + SIGN_IN_SECONDS
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return
+        time.sleep(1)
+    _close_gracefully(proc)
+
+
+def _close_gracefully(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    subprocess.run(
+        ["taskkill", "/PID", str(proc.pid)],
+        capture_output=True,
+        creationflags=_NO_WINDOW,
+    )
+    try:
+        proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _read_session(binary: str, profile: Path) -> dict:
+    (profile / "DevToolsActivePort").unlink(missing_ok=True)
     proc = subprocess.Popen(
         [
             binary,
@@ -90,76 +135,29 @@ def run(*, browser: str | None = None, data_dir: Path | None = None) -> None:
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-sync",
-            LOGIN_URL,
-        ],
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            "--headless=new",
+            "about:blank",
+        ]
     )
     try:
-        port = _debugging_port(profile, proc)
-        session = _wait_for_session(proc, port)
-        tokens = _try_cli_token(port)
-        if tokens:
-            session.update(tokens)
-            print("Merge accepted a refreshable sign-in.", flush=True)
-        else:
-            print("Using the browser session.", flush=True)
+        try:
+            port = _debugging_port(profile, proc)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Close every Merge Gateway sign-in window, then try again."
+            ) from exc
+        cookies = _browser_cookies(port)
     finally:
         _stop(proc)
-    save_session(data_dir or app_data_dir(), session)
-    print("Merge Gateway session stored.", flush=True)
-
-
-def _wait_for_session(proc: subprocess.Popen, port: int) -> dict:
-    deadline = time.monotonic() + SIGN_IN_SECONDS
-    last = "Timed out waiting for Google sign-in."
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError("The sign-in window closed before Merge accepted the login.")
-        try:
-            cookies = _browser_cookies(port)
-            if cookies:
-                _snapshot, updated = fetch_overview({"cookies": cookies})
-                return updated
-        except MergeAuthError as exc:
-            last = str(exc)
-        except (OSError, RuntimeError) as exc:
-            last = str(exc)
-        time.sleep(2)
-    raise RuntimeError(last)
-
-
-def _try_cli_token(port: int) -> dict | None:
-    """Ask Merge's CLI login for a refresh token. Billing usually rejects it."""
-    verifier = secrets.token_urlsafe(32)
-    state = secrets.token_urlsafe(32)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    if not cookies:
+        raise RuntimeError(
+            "No Merge Gateway session was found. Sign in with Google, then close the window."
+        )
     try:
-        with _Loopback() as receiver:
-            _navigate(port, authorize_url(receiver.redirect_uri, state, challenge))
-            result = receiver.wait(TOKEN_SECONDS)
-        if result is None or result.get("state") != state or not result.get("code"):
-            return None
-        tokens = exchange_cli_code(receiver.redirect_uri, str(result["code"]), verifier)
-        refresh = tokens.get("refresh_token")
-        if not refresh:
-            return None
-        refreshed = refresh_cli_token(str(refresh))
-        access = refreshed.get("access_token")
-        if not access:
-            return None
-        fetch_overview({"access_token": str(access)})
-    except Exception:
-        return None
-    stored = {
-        "access_token": str(access),
-        "refresh_token": str(refreshed.get("refresh_token") or refresh),
-    }
-    expires_in = refreshed.get("expires_in")
-    if isinstance(expires_in, (int, float)) and expires_in > 0:
-        from datetime import datetime, timedelta, timezone
-
-        stored["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=float(expires_in))).isoformat()
-    return stored
+        _snapshot, updated = fetch_overview({"cookies": cookies})
+    except MergeAuthError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return updated
 
 
 def _browser_cookies(port: int) -> list[dict]:
@@ -169,22 +167,10 @@ def _browser_cookies(port: int) -> list[dict]:
         raise RuntimeError("The browser did not offer a debugging connection.")
     cdp = CDP(ws_url)
     try:
-        result = cdp.call("Network.getAllCookies")
+        result = cdp.call("Storage.getCookies")
     finally:
         cdp.close()
     return _pick_cookies(result.get("cookies") or [])
-
-
-def _navigate(port: int, url: str) -> None:
-    targets = _debug_json(port, "/json/list")
-    page = next((item for item in targets if item.get("type") == "page" and item.get("webSocketDebuggerUrl")), None)
-    if page is None:
-        raise RuntimeError("The browser has no page to continue sign-in.")
-    cdp = CDP(str(page["webSocketDebuggerUrl"]))
-    try:
-        cdp.call("Page.navigate", {"url": url})
-    finally:
-        cdp.close()
 
 
 def _pick_cookies(raw: list) -> list[dict]:
@@ -218,7 +204,7 @@ def _debugging_port(profile: Path, proc: subprocess.Popen) -> int:
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError("The browser exited before the sign-in window opened.")
+            raise RuntimeError("The browser exited before the session could be read.")
         if path.is_file():
             line = path.read_text(encoding="utf-8").splitlines()
             if line and line[0].isdigit():
@@ -370,59 +356,6 @@ def _client_frame(payload: bytes, opcode: int = 0x1) -> bytes:
     header.extend(mask)
     header.extend(masked)
     return bytes(header)
-
-
-class _Loopback:
-    def __init__(self) -> None:
-        self._server = HTTPServer(("127.0.0.1", 0), _Callback)
-        self._server.done = threading.Event()  # type: ignore[attr-defined]
-        self._server.result = {}  # type: ignore[attr-defined]
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-
-    @property
-    def redirect_uri(self) -> str:
-        host, port = self._server.server_address[:2]
-        return f"http://{host}:{port}/callback"
-
-    def __enter__(self) -> _Loopback:
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-
-    def wait(self, timeout: float) -> dict | None:
-        if not self._server.done.wait(timeout):  # type: ignore[attr-defined]
-            return None
-        return dict(self._server.result)  # type: ignore[attr-defined]
-
-
-class _Callback(BaseHTTPRequestHandler):
-    server: HTTPServer
-
-    def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path != "/callback":
-            self.send_response(404)
-            self.end_headers()
-            return
-        query = parse_qs(parsed.query)
-        self.server.result = {  # type: ignore[attr-defined]
-            "code": (query.get("code") or [None])[0],
-            "state": (query.get("state") or [None])[0],
-            "error": (query.get("error") or [None])[0],
-        }
-        body = b"<p>Merge sign-in finished. You can close this window.</p>"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-        self.server.done.set()  # type: ignore[attr-defined]
-
-    def log_message(self, format: str, *args) -> None:
-        return
 
 
 def main() -> int:

@@ -22,7 +22,9 @@ The reset window comes from the plan (start + next reset), not a guessed Mondayâ
 
 Under the weekly pool, the window shows the complimentary Pro credits ($10 each month). **Used** is how much of that grant is spent. **Should be** is how far through the month you are. The session is stored on this computer (DPAPI-protected), and the app never shows the cookie.
 
-Merge has no public credit-balance API. Sign in from this computer, which has Chrome or Edge. Open the app menu and choose **Sign in to Merge Gateway**. A browser window opens for the Google sign-in, then closes and the app picks up the session. Run it again when the bar says the session expired. The browser keeps its own profile (`%LOCALAPPDATA%\GrokBotPace\merge-browser`), so the next sign-in is usually a short Google confirm. **Sign out of Merge Gateway** in the menu forgets the session.
+Merge has no public credit-balance API. Sign in from this computer, which has Chrome or Edge. Open the app menu and choose **Sign in to Merge Gateway**. A browser window opens for the Google sign-in; finish signing in, then **close that window**. The app then reads the session and closes. Run it again when the bar says the session expired. The browser keeps its own profile (`%LOCALAPPDATA%\GrokBotPace\merge-browser`), so the next sign-in is usually a short Google confirm. **Sign out of Merge Gateway** in the menu forgets the session.
+
+Google blocks sign-in when a browser is started for automation, so the window is opened normally and only read afterward. That is why the window has to be closed before the session is stored.
 
 ## Install
 

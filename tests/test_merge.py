@@ -186,3 +186,38 @@ def test_merge_pace_uses_the_month(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
 def test_no_session_constant() -> None:
     assert "No Merge Gateway session" in NO_SESSION
     assert "expired" in EXPIRED.lower()
+
+
+def test_pick_cookies_keeps_only_merge_dev() -> None:
+    from grok_bot_pace.merge_login import _pick_cookies
+
+    picked = _pick_cookies(
+        [
+            {"name": "session", "value": "v", "domain": ".merge.dev", "httpOnly": True},
+            {"name": "session", "value": "v", "domain": "example.com"},
+            {"name": "empty", "value": "", "domain": ".merge.dev"},
+            {"name": "token", "value": "t", "domain": "api-gateway.merge.dev", "expires": 1_800_000_000.0},
+        ]
+    )
+    assert [c["name"] for c in picked] == ["session", "token"]
+    assert picked[1]["expires"] == 1_800_000_000.0
+    assert picked[0]["httpOnly"] is True
+
+
+def test_read_session_errors_without_cookies(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from grok_bot_pace import merge_login
+
+    class _Proc:
+        pid = 1
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(merge_login, "_debugging_port", lambda profile, proc: 1)
+    monkeypatch.setattr(merge_login, "_browser_cookies", lambda port: [])
+    monkeypatch.setattr(merge_login.subprocess, "Popen", lambda *a, **k: _Proc())
+    with pytest.raises(RuntimeError, match="No Merge Gateway session was found"):
+        merge_login._read_session("chrome.exe", tmp_path)

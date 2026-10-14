@@ -940,7 +940,9 @@ class PaceApp:
             return
         self._merge_signing_in = True
         self.merge_status.configure(text="Opening browser…", fg=TEXT)
-        self.merge_note.configure(text="Sign in to Merge Gateway with Google in the window that opens.")
+        self.merge_note.configure(
+            text="Sign in to Merge Gateway with Google, then close the browser window."
+        )
 
         def work() -> None:
             error = None

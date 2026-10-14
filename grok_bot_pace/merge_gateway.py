@@ -12,7 +12,6 @@ the dashboard cookie never has to be pasted by hand.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.cookiejar import Cookie, CookieJar
@@ -32,8 +31,8 @@ CLIENT_ID = "mgw-cli"
 SCOPE = "manage_keys"
 SESSION_FILE = "merge-session.dpapi"
 USER_AGENT = "grok-bot-pace"
-EXPIRED = "Merge Gateway session expired. Sign in again from Settings."
-NO_SESSION = "No Merge Gateway session. Sign in from Settings."
+EXPIRED = "Merge Gateway session expired. Choose Sign in to Merge Gateway from the menu."
+NO_SESSION = "No Merge Gateway session. Choose Sign in to Merge Gateway from the menu."
 
 
 class MergeAuthError(RuntimeError):
