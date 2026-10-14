@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from PIL import ImageTk
 
+from grok_bot_pace import merge_gateway, merge_login
 from grok_bot_pace.api import UsageSnapshot, fetch_period_usage, fetch_usage
 from grok_bot_pace.auth import Tokens, app_data_dir, load_tokens, refresh_access_token, save_cached
 from grok_bot_pace.icons import (
@@ -27,6 +28,15 @@ from grok_bot_pace.icons import (
     image_to_hicon,
     status_color,
     system_icon_sizes,
+)
+from grok_bot_pace.merge_gateway import (
+    MergeAuthError,
+    MergeSnapshot,
+    clear_session as clear_merge_session,
+    fetch_overview as fetch_merge_overview,
+    format_usd,
+    load_session as load_merge_session,
+    save_session as save_merge_session,
 )
 from grok_bot_pace.pace import Pace, compute_pace, format_hours, status_label, tooltip_text
 from grok_bot_pace.supergrok import (
@@ -44,7 +54,7 @@ MUTED = "#9aa0a6"
 BAR_BG = "#2a2d33"
 REFRESH_MS = 5 * 60 * 1000
 TICK_MS = 15_000
-WINDOW_W, WINDOW_H = 340, 280
+WINDOW_W, WINDOW_H = 340, 480
 
 PRODUCT_COLORS = {
     "Cursor": "#7dd3fc",
@@ -74,6 +84,10 @@ def _sg_cache_path() -> Path:
 
 def _pool_cache_path() -> Path:
     return app_data_dir() / "last_pool.json"
+
+
+def _merge_cache_path() -> Path:
+    return app_data_dir() / "last_merge.json"
 
 
 def load_settings() -> dict:
@@ -130,6 +144,22 @@ def _cached_pool() -> SuperGrokSnapshot | None:
     if pool is not None:
         return pool
     return assemble_pool(load_cached_snapshot(), None, load_cached_supergrok())
+
+
+def load_cached_merge() -> MergeSnapshot | None:
+    if load_merge_session(app_data_dir()) is None:
+        return None
+    path = _merge_cache_path()
+    if not path.exists():
+        return None
+    try:
+        return MergeSnapshot.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def save_cached_merge(snapshot: MergeSnapshot) -> None:
+    _merge_cache_path().write_text(json.dumps(snapshot.to_dict()), encoding="utf-8")
 
 
 def project_root() -> Path:
@@ -314,6 +344,11 @@ class PaceApp:
         )
         self.error: str | None = None
         self.breakdown_error: str | None = None
+        self.merge: MergeSnapshot | None = load_cached_merge()
+        self.merge_pace: Pace | None = (
+            compute_pace(self.merge.as_usage(), stale=True) if self.merge is not None else None
+        )
+        self.merge_error: str | None = None
         self._detail_key: object = None
         self._fitted: tuple[int, int] | None = None
         self._refreshing = False
@@ -384,8 +419,70 @@ class PaceApp:
         self.details = tk.Frame(pad, bg=BG)
         self.details.pack(fill="x", pady=(10, 6))
 
+        tk.Frame(pad, bg=BAR_BG, height=1).pack(fill="x", pady=(8, 0))
+
+        merge_header = tk.Frame(pad, bg=BG)
+        merge_header.pack(fill="x", pady=(8, 0))
+        tk.Label(merge_header, text="Merge Gateway", fg=TEXT, bg=BG, font=_ui_font(11, bold=True)).pack(
+            side="left"
+        )
+        tk.Label(merge_header, text="free monthly credit", fg=MUTED, bg=BG, font=_ui_font(9)).pack(
+            side="right"
+        )
+
+        merge_numbers = tk.Frame(pad, bg=BG)
+        merge_numbers.pack(fill="x", pady=(6, 4))
+        merge_left = tk.Frame(merge_numbers, bg=BG)
+        merge_left.pack(side="left")
+        self.merge_used_value = tk.Label(
+            merge_left, text="--%", fg=TEXT, bg=BG, font=_ui_font(18, bold=True)
+        )
+        self.merge_used_value.pack(anchor="w")
+        tk.Label(merge_left, text="used", fg=MUTED, bg=BG, font=_ui_font(9)).pack(anchor="w")
+
+        merge_right = tk.Frame(merge_numbers, bg=BG)
+        merge_right.pack(side="right")
+        self.merge_expected_value = tk.Label(
+            merge_right, text="--%", fg=TEXT, bg=BG, font=_ui_font(18, bold=True)
+        )
+        self.merge_expected_value.pack(anchor="e")
+        tk.Label(merge_right, text="should be", fg=MUTED, bg=BG, font=_ui_font(9)).pack(anchor="e")
+
+        self.merge_bar = tk.Canvas(pad, width=308, height=16, bg=BAR_BG, highlightthickness=0, bd=0)
+        self.merge_bar.pack(fill="x", pady=(2, 4))
+        tk.Label(
+            pad,
+            text="Fill is free credit.  The line is an even monthly pace.",
+            fg=MUTED,
+            bg=BG,
+            font=_ui_font(8),
+            wraplength=WINDOW_W - 40,
+            justify="left",
+        ).pack(anchor="w")
+
+        merge_meta = tk.Frame(pad, bg=BG)
+        merge_meta.pack(fill="x", pady=(8, 2))
+        self.merge_status = tk.Label(
+            merge_meta, text="Waiting for Merge Gateway…", fg=TEXT, bg=BG, font=_ui_font(10, bold=True)
+        )
+        self.merge_status.pack(side="left")
+        self.merge_reset = tk.Label(merge_meta, text="", fg=MUTED, bg=BG, font=_ui_font(9))
+        self.merge_reset.pack(side="right")
+
+        self.merge_note = tk.Label(
+            pad,
+            text="",
+            fg=MUTED,
+            bg=BG,
+            font=_ui_font(8),
+            wraplength=WINDOW_W - 40,
+            justify="left",
+            anchor="w",
+        )
+        self.merge_note.pack(fill="x")
+
         buttons = tk.Frame(pad, bg=BG)
-        buttons.pack(fill="x")
+        buttons.pack(fill="x", pady=(8, 0))
         self._btn(buttons, "Refresh", self.refresh_async).pack(side="left")
         self._btn(buttons, "Open Grok Bot", self.open_grok_bot).pack(side="left", padx=(8, 0))
         self._btn(buttons, "Menu", self._show_menu).pack(side="right")
@@ -411,6 +508,9 @@ class PaceApp:
             postcommand=self._sync_menu_checks,
         )
         self.menu.add_command(label="Refresh now", command=self.refresh_async)
+        self.menu.add_separator()
+        self.menu.add_command(label="Sign in to Merge Gateway", command=self.sign_in_merge)
+        self.menu.add_command(label="Sign out of Merge Gateway", command=self.sign_out_merge)
         self.menu.add_separator()
         self._always_var = tk.BooleanVar(value=bool(self.settings.get("always_on_top", True)))
         self._startup_var = tk.BooleanVar(value=is_startup_enabled())
@@ -610,6 +710,9 @@ class PaceApp:
         if self.pool is not None:
             self.pace = compute_pace(self.pool.as_usage(), stale=bool(self.error))
             self.render()
+        elif self.merge is not None:
+            self.merge_pace = compute_pace(self.merge.as_usage(), stale=bool(self.merge_error))
+            self.render()
         self.root.after(TICK_MS, self._tick)
 
     def refresh_async(self) -> None:
@@ -647,12 +750,32 @@ class PaceApp:
                 credits = fetch_supergrok()
             except Exception as exc:
                 credits_error = str(exc)
+            merge, merge_error = self._fetch_merge()
             self.root.after(
                 0,
-                lambda: self._on_refresh(sand, sand_error, period, period_error, credits, credits_error),
+                lambda: self._on_refresh(
+                    sand, sand_error, period, period_error, credits, credits_error, merge, merge_error
+                ),
             )
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _fetch_merge(self) -> tuple[MergeSnapshot | None, str | None]:
+        session = load_merge_session(app_data_dir())
+        if session is None:
+            return None, merge_gateway.NO_SESSION
+        try:
+            snapshot, updated = fetch_merge_overview(session)
+        except MergeAuthError as exc:
+            return None, str(exc)
+        except Exception as exc:
+            return None, str(exc)
+        if updated != session:
+            try:
+                save_merge_session(app_data_dir(), updated)
+            except (OSError, ValueError):
+                pass
+        return snapshot, None
 
     def _on_refresh(
         self,
@@ -662,6 +785,8 @@ class PaceApp:
         period_error: str | None,
         credits,
         credits_error: str | None,
+        merge: MergeSnapshot | None = None,
+        merge_error: str | None = None,
     ) -> None:
         self._refreshing = False
         pool = assemble_pool(sand, period, credits)
@@ -675,7 +800,23 @@ class PaceApp:
             self.error = sand_error or period_error or credits_error or "Could not load usage"
         if self.pool is not None:
             self.pace = compute_pace(self.pool.as_usage(), stale=self.error is not None)
+        self._apply_merge(merge, merge_error)
         self.render()
+
+    def _apply_merge(self, merge: MergeSnapshot | None, merge_error: str | None) -> None:
+        if merge is not None:
+            self.merge = merge
+            self.merge_pace = compute_pace(merge.as_usage(), stale=False)
+            self.merge_error = None
+            try:
+                save_cached_merge(merge)
+            except Exception:
+                pass
+            return
+        self.merge_error = merge_error
+        if merge_error and ("expired" in merge_error.lower() or merge_error == merge_gateway.NO_SESSION):
+            self.merge = None
+            self.merge_pace = None
 
     def _auto_refresh(self) -> None:
         self.refresh_async()
@@ -700,6 +841,7 @@ class PaceApp:
             self._draw_bar(self.bar, pace.used_percent, pace.expected_percent, color)
             self.root.title(f"{badge_label(pace)} pts vs pace")
         self._render_details()
+        self._render_merge()
 
         fetched = pace.fetched_at if pace else None
         extra = f"  ·  {self.error}" if self.error else ""
@@ -765,6 +907,69 @@ class PaceApp:
         label = name if not note else f"{name}  ·  {note}"
         tk.Label(row, text=label, fg=TEXT, bg=BG, font=_ui_font(9)).pack(side="left", padx=(8, 0))
         tk.Label(row, text=format_percent(pct), fg=MUTED, bg=BG, font=_ui_font(9)).pack(side="right")
+
+    def _render_merge(self) -> None:
+        pace = self.merge_pace
+        if pace is None:
+            self.merge_used_value.configure(text="--%", fg=TEXT)
+            self.merge_expected_value.configure(text="--%")
+            self.merge_status.configure(
+                text=self.merge_error or "Waiting for Merge Gateway…", fg=TEXT
+            )
+            self.merge_reset.configure(text="")
+            self.merge_note.configure(text="")
+            self._draw_bar(self.merge_bar, 0, 0, status_color("unknown"))
+            return
+        color = status_color(pace.status)
+        self.merge_used_value.configure(text=f"{pace.used_percent:.0f}%", fg=color)
+        self.merge_expected_value.configure(text=f"{pace.expected_percent:.0f}%")
+        self.merge_status.configure(text=status_label(pace, period="month"), fg=color)
+        self.merge_reset.configure(text=f"resets in {format_hours(pace.resets_in)}")
+        self._draw_bar(self.merge_bar, pace.used_percent, pace.expected_percent, color)
+        note = []
+        if self.merge is not None:
+            note.append(f"{format_usd(self.merge.spent_usd)} of {format_usd(self.merge.amount_usd)}")
+            if self.merge.purchased_spent_usd > 0:
+                note.append(f"Also {format_usd(self.merge.purchased_spent_usd)} from purchased credits")
+        if self.merge_error:
+            note.append(self.merge_error)
+        self.merge_note.configure(text=" · ".join(note))
+
+    def sign_in_merge(self) -> None:
+        if getattr(self, "_merge_signing_in", False):
+            return
+        self._merge_signing_in = True
+        self.merge_status.configure(text="Opening browser…", fg=TEXT)
+        self.merge_note.configure(text="Sign in to Merge Gateway with Google in the window that opens.")
+
+        def work() -> None:
+            error = None
+            try:
+                merge_login.run(data_dir=app_data_dir())
+            except Exception as exc:
+                error = str(exc).strip() or exc.__class__.__name__
+            self.root.after(0, lambda: self._on_merge_sign_in(error))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_merge_sign_in(self, error: str | None) -> None:
+        self._merge_signing_in = False
+        if error:
+            self.merge_error = error
+            self.render()
+            return
+        self.refresh_async()
+
+    def sign_out_merge(self) -> None:
+        clear_merge_session(app_data_dir())
+        self.merge = None
+        self.merge_pace = None
+        self.merge_error = merge_gateway.NO_SESSION
+        try:
+            _merge_cache_path().unlink(missing_ok=True)
+        except OSError:
+            pass
+        self.render()
 
     def _fit_window(self) -> None:
         if not self.root.winfo_viewable():
