@@ -18,14 +18,6 @@ The X Subscription uses one weekly pool for Grok, Grok Bot, and Cursor. The task
 
 The reset window comes from the plan (start + next reset), not a guessed Monday–Sunday week.
 
-## Merge Gateway
-
-Under the weekly pool, the window shows the complimentary Pro credits ($10 each month). **Used** is how much of that grant is spent. **Should be** is how far through the month you are. The session is stored on this computer (DPAPI-protected), and the app never shows the cookie.
-
-Merge has no public credit-balance API. Sign in from this computer, which has Chrome or Edge. Open the app menu and choose **Sign in to Merge Gateway**. A browser window opens for the Google sign-in; finish signing in, then **close that window**. The app then reads the session and closes. Run it again when the bar says the session expired. The browser keeps its own profile (`%LOCALAPPDATA%\GrokBotPace\merge-browser`), so the next sign-in is usually a short Google confirm. **Sign out of Merge Gateway** in the menu forgets the session.
-
-Google blocks sign-in when a browser is started for automation, so the window is opened normally and only read afterward. That is why the window has to be closed before the session is stored.
-
 ## Install
 
 1. Stay signed in to the **Grok Bot** desktop app.
@@ -53,4 +45,3 @@ This is unofficial and not affiliated with xAI or Cursor. Those usage endpoints 
 - Tray icon click: show the window
 - Tray / window **Quit**: exit
 - **Refresh**: fetch usage now (usage auto-refreshes every 5 minutes; the “should be” figure recomputes about every 15 seconds)
-- **Menu → Sign in to Merge Gateway** / **Sign out of Merge Gateway**: manage the monthly credit session
