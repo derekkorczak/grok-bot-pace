@@ -89,7 +89,7 @@ def format_hours(delta: timedelta) -> str:
     return f"{minutes}m"
 
 
-def status_label(pace: Pace, period: str = "week") -> str:
+def status_label(pace: Pace) -> str:
     pts = abs(pace.delta)
     if pace.status == "critical":
         if not pace.available:
@@ -99,7 +99,7 @@ def status_label(pace: Pace, period: str = "week") -> str:
         return f"Over pace by {pts:.0f} pts"
     if pace.status == "under":
         return f"Under pace by {pts:.0f} pts"
-    return f"On track for the {period}"
+    return "On track for the week"
 
 
 def tooltip_text(pace: Pace) -> str:
